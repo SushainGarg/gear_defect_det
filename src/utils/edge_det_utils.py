@@ -53,8 +53,8 @@ def intensity_gradient(img_mat):
     
     mag = np.hypot(gx , gy)
     mag *= 255.0/(np.max(mag) if np.max(mag) > 0 else 1)
-    # gx *= 255.0/(np.max(gx) if np.max(gx) > 0 else 1)
-    # gy *= 255.0/(np.max(gy) if np.max(gy) > 0 else 1)
+    gx *= 255.0/(np.max(gx) if np.max(gx) > 0 else 1)
+    gy *= 255.0/(np.max(gy) if np.max(gy) > 0 else 1)
     dirn = np.arctan2(gy , gx)
     
     return {'mag': mag,
@@ -104,9 +104,10 @@ def hysterisis(nms , low , high):
     return (fin_mask*255).astype(np.uint8)
 
 def thresh_comp(nms: np.ndarray , sigma):
-    print(nms[nms>0][:20])
-    v = np.median(nms[nms>0])
+    print(nms[nms>0].shape)
+    v = np.percentile(nms[nms>0] , 70)
     print(f"Degub Median: {v}")
+    # v = 0.5
     low = int(max(0 , (1.0 - sigma) * v))
     high = int(min(255 , (1.0 + sigma) * v))
     print(f"Hysteresis Thresholds: {high} - {low}")
@@ -120,7 +121,7 @@ def orchecterate_canny_arr(img: np.ndarray , gauss_kernel_size: int, gauss_std: 
     low , high = thresh_comp(nms , sigma)
     canny_edge = hysterisis(nms , low , high)
     write_img(f'edge_det010.png' , canny_edge)
-    return canny_edge , high
+    return canny_edge , high , int_grad['mag']
 
 def orchecterate_canny_path(img_path: str):
     img = read_img(img_path)
@@ -130,15 +131,14 @@ def orchecterate_canny_path(img_path: str):
     nms = nm_sup(int_grad['mag'] , int_grad['dirn'])
     low , high = thresh_comp(nms , sigma=0.33)
     canny_edge = hysterisis(nms , low , high)
-    write_img('edge_det010.png' , canny_edge)
-
+    write_img("edge_det.png" , canny_edge)
 # theta = rad * 360/pi
 # binning rads into 0 , 90 , 45 and 135
 # equivalent rads = 0 , pi/2 , pi/4 , 3pi/4
 # create a n*n array, for every entry, i,j starting from -(n-1)/2 to (n-1)/2 , calc l2 norm with x=i , y=j
 # upper triangular matrix of distance calculations
 if __name__ == '__main__':
-    orchecterate_canny_path("/home/sgarg10/gear_defect_det/GDIM/Simulink/Defect_Gear_1_frames/frame_00488.jpg")
+    orchecterate_canny_path("/home/sgarg10/gear_defect_det/GDIM/Simulink/Defect_Gear_1_frames/frame_00001.jpg")
 #     print(img_mat.shape)
 #     kernel = gaussian_kernel_2d(5, 1)
 #     print(kernel.shape)

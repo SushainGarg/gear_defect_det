@@ -3,6 +3,7 @@ import cv2 as cv
 from collections import deque
 from tqdm import tqdm
 from edge_det_utils import orchecterate_canny_arr
+from concurrent.futures import ThreadPoolExecutor
 # 207 - 628
 # width: 2160 , height: 3840
 # (772, 3840, 2160)
@@ -35,9 +36,9 @@ def gt_frames(teeth_all: np.array , start , end):
     print(f"good frames: {gtf.shape}")
     return gtf
 
-def otsu_bin(frame: np.array , thresh):
-    _ , binary = cv.threshold(frame , thresh , 255 , cv.THRESH_BINARY_INV)
-    cv.imwrite('otsu_check_02.png' , binary)
+def otsu_bin(frames: np.array , thresh):
+    binary = (frames < thresh).astype(np.uint8) * 255
+    cv.imwrite('otsu_check_02.png' , binary[123])
     return binary
 
 def otsu_thresh(hist: np.array):
@@ -72,13 +73,14 @@ def master_hist(gtf: np.array):
         master_hist += hist
     return master_hist
     
-def bg_sub(gtf: np.array , check_int: int):
+def bg_sub(gtf: np.array , check_int: int = 0):
     backsub = cv.createBackgroundSubtractorMOG2(history=420)
     backsub2 = cv.createBackgroundSubtractorKNN(history=420 , detectShadows=1)
     lr = 0.001
     deque(tqdm(((backsub.apply(gtf[i] , learningRate=lr) , backsub2.apply(gtf[i] , learningRate=lr)) for i in range(gtf.shape[0] - 1)) , total=int(gtf.shape[0]-1) , desc="training MOG and KNN") , maxlen=0)
-    # fgm = backsub.apply(gtf[-1 , ...])
-    fgm2 = backsub2.apply(gtf[check_int , ...])
+    # fgm = backsub.apply(gtf[-1 , ...]) 
+    fgm2 = np.array([backsub2.apply(frame, learningRate=0) for frame in gtf])
+    print(f"fgm2 shape: {fgm2.shape}")
     # print(f"fgm: {fgm.shape}")
     # cv.imwrite('fg_MOG1.png' , fgm)
     
@@ -87,26 +89,49 @@ def bg_sub(gtf: np.array , check_int: int):
     return fgm2
 
 def roi_def(binary: np.array , img: np.array):
-    mask = np.zeros_like(binary)
-    cv.rectangle(mask , (700 , 700) , (2160, 2600) , 255 , -1)
-    fin_mask = cv.bitwise_and(binary , mask)
-    orig_mask = cv.bitwise_and(img , mask)
-    return fin_mask[700:2600 , 700:2160] , orig_mask
+    y1, y2, x1, x2 = 700, 2600, 700, 2160
+    # mask = np.zeros_like(binary)
+    # cv.rectangle(mask , (700 , 700) , (2160, 2600) , 255 , -1)
+    fin_mask = binary[: , y1:y2 , x1:x2]
+    orig_mask = img[: , y1:y2 , x1:x2]
+    return fin_mask , orig_mask
 
 def s_moments(mask: np.array):
-    mask = (mask > 0).astype(np.uint8)
-    M = cv.moments(mask)
-    cx = M['m10'] / M['m00']
-    cy = M['m01'] / M['m00']
-    area = M['m00']
-    print(f"area: {area} , COM x: {cx} , COM y: {cy}")
-    return cx , cy , area
+    # mask = (mask > 0).astype(np.uint8)
+    # M = cv.moments(mask)
+    areas = np.sum(mask > 0, axis=(1,2))
+    H,W = mask.shape[1], mask.shape[2]
+    x_coords = np.arange(W)
+    y_coords = np.arange(H)
+    
+    m10 = np.sum(mask , axis=1) @ x_coords
+    m01 = np.sum(mask , axis=2) @ y_coords
+    cx_all = (m10 / 255) / (areas + 1e-6)
+    cy_all = (m01 / 255) / (areas + 1e-6)
+    # cx = M['m10'] / M['m00']
+    # cy = M['m01'] / M['m00']
+    # area = M['m00']
+    print(f"area: {areas[123]} , COM x: {cx_all[123]} , COM y: {cy_all[123]}")
+    return cx_all , cy_all , areas
 
+def batch_ref_mask(fg_knn, iterations=4):
+    N= fg_knn.shape[0]
+    dil_stack = np.empty_like(fg_knn)
+    def dilate_worker(i):
+        dil_stack[i] = cv.dilate(fg_knn[i], np.ones((20,20), np.uint8), iterations=iterations)
+    with ThreadPoolExecutor() as executor:
+        executor.map(dilate_worker, range(N))
+    return dil_stack
 def otsu_knn(binary_otsu: np.array , fg_knn: np.array):
-    ref_mask = cv.bitwise_and(binary_otsu , cv.dilate(fg_knn , (20,20), iterations=4))
+    # dil_kern = cv.dilate(fg_knn , np.ones((20,20), np.uint8), iterations=4)
+    # ref_mask = (binary_otsu & dil_kern).astype(np.uint8)
+    dil_stack = batch_ref_mask(fg_knn)
+    ref_mask = (binary_otsu & dil_stack)
     kernel = np.ones((5,2) , np.uint8)
-    solid_mask = cv.morphologyEx(ref_mask , cv.MORPH_OPEN, kernel)
-    solid_mask = (solid_mask > 0).astype(np.uint8) * 255
+    # solid_mask = cv.morphologyEx(ref_mask , cv.MORPH_OPEN, kernel)
+    # solid_mask = (solid_mask > 0).astype(np.uint8) * 255
+    solid_mask = np.array([cv.morphologyEx(f , cv.MORPH_OPEN , kernel) for f in ref_mask])
+    solid_mask[solid_mask > 0] = 255
     return solid_mask
 
 def write_video(fname: str , f_obj: np.array):
@@ -116,7 +141,7 @@ def write_video(fname: str , f_obj: np.array):
     
 def radius_boundaries(area):
     r = np.sqrt(area / np.pi)
-    delta = int(r * 0.2)
+    delta = (r * 0.2).astype(np.uint8)
     return r , delta
 
 def cv_canny_v(binary: np.ndarray):
@@ -178,26 +203,104 @@ def horizontal_shift(wave_cur , wave_arr):
         
     return fin_shift
 
+def batch_canny(stack , high , low):
+    out = np.empty_like(stack)
+    def worker(i):
+        out[i] = cv.Canny(stack[i] , low , high)
+    
+    with ThreadPoolExecutor() as executor:
+        executor.map(worker , range(stack.shape[0]))
+    
+    return out
+
+def batch_hough(edge_arr, theta, threshold , min_theta , max_theta):
+    N = edge_arr.shape[0]
+    out = [None] * N
+    threshold = 400
+    def worker(i):
+        out[i] = cv.HoughLines(edge_arr[i] , rho=1 ,theta = theta, threshold=threshold , min_theta=min_theta , max_theta = max_theta)
+    
+    with ThreadPoolExecutor() as executor:
+        executor.map(worker , range(N))
+    
+    val_res = [res for res in out if res is not None]
+    # print(np.array(val_res).shape)
+    return val_res
+
+def find_best_line(lines , cx , cy):
+    center_line = np.zeros((2))
+    l_arr = lines.reshape(-1 , 2)
+    rhos = l_arr[: , 0]
+    theta = l_arr[: , 1]
+    
+    dists = np.abs(cx*np.cos(theta) + cy*np.sin(theta) - rhos)
+    min_id = np.argmin(dists)
+    center_line = [theta[min_id] , rhos[min_id]]
+    return center_line
+    
+def batch_center_line(lines , cx , cy):
+    N = len(lines)
+    out = np.empty((N , 2))
+    
+    def workers(i):
+        out[i] = find_best_line(lines[i] , cx , cy)
+    
+    with ThreadPoolExecutor() as executor:
+        executor.map(workers , range(N))
+    
+    return out
+def batch_center_line_vec(lines, cx, cy):
+    N = len(lines)
+    out = np.empty((N, 2))
+
+    for i in tqdm(range(N) , desc="center_line per frame"):
+        if lines[i] is None:
+            out[i] = [np.nan, np.nan]
+            continue
+            
+        l_arr = lines[i][:, 0, :]
+        r, t = l_arr[:, 0], l_arr[:, 1]
+        dists = np.abs(cx * np.cos(t) + cy * np.sin(t) - r)
+        
+        idx = np.argmin(dists)
+        out[i, 0] = t[idx]
+        out[i, 1] = r[idx] 
+    return out
+
+def best_line(lines , mu , std):
+    t = lines[: , 1]
+    r = lines[: , 0]
+    mu_t = mu[0]
+    mu_r = mu[1]
+    std_t = std[0]
+    std_r = std[1]
+    z_theta = (t - mu_t) / (std_t + 1e-6)
+    z_rho = (r - mu_r) / (std_r + 1e-6)
+    prob = np.sqrt(z_theta ** 2 + z_rho**2)
+    best_idx = np.argmin(prob)
+    return lines[best_idx]
+
+
 if __name__ == '__main__':
     teeths , w , h = read_frames()
     fame_coll = gt_frames(np.array(teeths) , 207 , 628)
-    check_frame_int = 23
-    fg_mask = bg_sub(fame_coll , check_frame_int)
+    fg_mask = bg_sub(fame_coll)
     hist = master_hist(fame_coll)
     var , thresh = otsu_thresh(hist)
-    binary = otsu_bin(fame_coll[check_frame_int] , thresh)
+    binary = otsu_bin(fame_coll , thresh)
     solid_mask = otsu_knn(binary , fg_mask)
-    fin_mask , orig_mask = roi_def(solid_mask , fame_coll[check_frame_int])
+    fin_mask , orig_mask = roi_def(solid_mask , fame_coll)
     # print(f"final mask Shape , width: {fin_mask.shape[1]} , height: {fin_mask.shape[0]}")
     cx , cy , area = s_moments(fin_mask)
+    cx , cy = np.mean(cx) , np.mean(cy)
     r_com , delta = radius_boundaries(area)
-    print(f"r_com: {r_com} , delta: {delta}")
-    cv.imwrite("solid_mask.png" , solid_mask)
-    cv.imwrite("otsu_roi.png" , fin_mask)
-    cv.imwrite("img_roi.png" , orig_mask)
-    waves = extract_triple_wave(fin_mask , cy)
-    print(np.array(waves).shape)
-    # edge_img , hysteresis_high = orchecterate_canny_arr(fin_mask,5,1)
+    print(f"cx: {cx} , cy: {cy} , r_com: {np.mean(r_com)} , delta: {np.mean(delta)}")
+    cv.imwrite("solid_mask.png" , solid_mask[123])
+    cv.imwrite("otsu_roi.png" , fin_mask[123])
+    cv.imwrite("img_roi.png" , orig_mask[123])
+    # waves = extract_triple_wave(fin_mask , cy)
+    # edge_img , hysteresis_high = orchecterate_canny_arr(orig_mask,5,1)
+    edge_arr = batch_canny(orig_mask , 3 ,1)
     # contours , _ = cv.findContours(fin_mask , cv.RETR_EXTERNAL , cv.CHAIN_APPROX_SIMPLE)
     # ellipse = cv.fitEllipse(max(contours , key=cv.contourArea))
     
@@ -206,9 +309,46 @@ if __name__ == '__main__':
     # cv.drawContours(col_img , contours , -1 , (0 , 255 , 0) , 2)
     # cv.ellipse(col_img,ellipse,(255 , 0 , 0), 2)
     # cv.imwrite('contaour_mask.png', col_img)
+    minA = np.deg2rad(5)
+    maxA = np.deg2rad(20)
+    threshold = 400
+    lines = batch_hough(edge_arr, theta=np.pi/180 , threshold=threshold , min_theta=minA , max_theta=maxA)
+    # line_img = cv.cvtColor(edge_img, cv.COLOR_GRAY2BGR)
+    # center_line = np.zeros((len(lines) , 2))
+    # for i in tqdm(range(0 , len(lines)) , desc="Processing img Lines"):
+        # print(np.array(lines[i].shape))
+        # min_dist = float('inf')
+        # tmp_ln = np.zeros((2))
+        # for j in range(0, len(lines[i])):
+        #     rho = lines[i][j][0][0]
+        #     theta = lines[i][j][0][1]
+        #     a = np.cos(theta)
+        #     b = np.sin(theta)
+        #     x0 = a*rho
+        #     y0 = b*rho
+        #     dist = abs(cx*np.cos(theta) + cy*np.sin(theta) - rho)
+        #     if dist < min_dist: 
+        #         min_dist = dist
+        #         tmp_ln[0] = theta
+        #         tmp_ln[1] = rho
+        # center_line[i][0] = tmp_ln[0]
+        # center_line[i][1] = tmp_ln[1]
     
-    # circles = cv.HoughCircles(edge_img[700:2600, 700:2160], cv.HOUGH_GRADIENT, dp=1, param1=hysteresis_high ,param2=500, minDist=50 , minRadius=int(r_com-delta) , maxRadius=int(r_com+delta))
+            # x1 = int(x0+3000 * (-b))
+            # y1 = int(y0+3000* (a))
+            # x2 = int(x0-3000 * (-b))
+            # y2 = int(y0-3000 * (a))
+            # cv.line(line_img , (x1, y1), (x2, y2), (0, 0, 255), 2)
+            # cv.imwrite(f"hough_lines/edege_img__run1_{i}.png" , line_img)
     # print(circles)
+    center_line = batch_center_line_vec(lines , cx , cy)
+    print(f"Center_line Shape: {center_line.shape}")
+    print(f"Center_Line Rand Entery : {center_line[10]}")
+    # print(f"distance: {min_dist} , theta: {center_line[0]} , rho: {center_line[1]}")
+
+    means = np.mean(center_line , axis=0)
+    stds = np.std(center_line, axis=0)
+    print(f"Gaussian Char mean: {means} , std {stds}")
     
     
  # Macro Pipeline -> parallel
@@ -226,3 +366,10 @@ if __name__ == '__main__':
  # 1D fourier Projection from ROI -> parallel
  # Entropy computation -> parallel
  # scoring function -> not yet decided
+ 
+ # Hough Lines -> Output is a set of angle(theta) and shortest distance from origin to line(rho)
+ # TO caluluate the best hough lines, we need to find the center hough line for each frame, and take the mean ans std for all center lines over rho and theta separately.
+ # Construct a joint gaussian distribution using computed mean and std
+ # figure out the Pixel range to crop from center hough line
+ # Implement this on matlab, in realtime, retrive frame by frame, do canny, and get the teeth using the above method and thresholds
+ # Feed it to the Matlab resnet-18 model 
