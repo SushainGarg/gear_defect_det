@@ -268,18 +268,69 @@ def batch_center_line_vec(lines, cx, cy):
     return out
 
 def best_line(lines , mu , std):
-    t = lines[: , 1]
-    r = lines[: , 0]
-    mu_t = mu[0]
-    mu_r = mu[1]
-    std_t = std[0]
-    std_r = std[1]
+    lines = lines.reshape(-1,2)
+    t , r = lines[: , 1], lines[: , 0]
+    mu_t , mu_r = mu[0], mu[1]
+    std_t, std_r=std[0], std[1]
     z_theta = (t - mu_t) / (std_t + 1e-6)
     z_rho = (r - mu_r) / (std_r + 1e-6)
     prob = np.sqrt(z_theta ** 2 + z_rho**2)
     best_idx = np.argmin(prob)
     return lines[best_idx]
 
+def rot_trlate_img(img , line , patch_size):
+    t , r = line[1] , line[0]
+    theta_deg = np.rad2deg(t)
+    # rot_angle = -theta_deg
+    
+    pivot_x = r*np.cos(t)
+    pivot_y = r*np.sin(t)
+    
+    M = cv.getRotationMatrix2D((pivot_x , pivot_y) , theta_deg , 1.0)
+    
+    M[0, 2] += (patch_size / 2 - pivot_x)
+    
+    return cv.warpAffine(img , M , (patch_size , img.shape[0]), flags=cv.INTER_LINEAR)
+
+def draw_line(rho , theta , line_img):
+    a = np.cos(theta)
+    b = np.sin(theta)
+    x0 = a*rho
+    y0 = b*rho
+    x1 = int(x0+3000 * (-b))
+    y1 = int(y0+3000* (a))
+    x2 = int(x0-3000 * (-b))
+    y2 = int(y0-3000 * (a))
+    cv.line(line_img , (x1, y1), (x2, y2), (0, 0, 255), 5)
+    return line_img
+
+def draw_lines(lines, edge_img):
+    line_img = cv.cvtColor(edge_img, cv.COLOR_GRAY2BGR)
+    min_dist = float('inf')
+    for j in tqdm(range(0, len(lines)), desc="Checking line Fidelity"):
+        rho = lines[j][0][0]
+        theta = lines[j][0][1]
+        dist = abs(cx*np.cos(theta) + cy*np.sin(theta) - rho)
+        if dist < min_dist:
+            min_dist = dist
+            line_img = draw_line(rho , theta , line_img)
+    cv.imwrite(f"edege_img__run_1.png" , line_img)
+
+def crop_roi(edge_img , orig_img , threshold , minA , maxA):
+    line_ls = cv.HoughLines(edge_img , rho=1 ,theta = np.pi/180, threshold=threshold , min_theta=minA , max_theta = maxA)
+    line = best_line(line_ls , means , stds)
+    line_img = draw_line(line[0] , line[1] , cv.cvtColor(orig_img , cv.COLOR_GRAY2BGR))
+    crop_roi = rot_trlate_img(orig_img, line , 300)
+    return crop_roi , line_img
+
+def batch_crop_roi(edge_arr , orig_mask, threshold , minA , maxA):
+    def worker(i):
+        crop_roi_img , line_img = crop_roi(edge_arr[i] , orig_mask[i], threshold , minA , maxA)
+        cv.imwrite(f"cropped_rois/cropped_{i}.png", crop_roi_img)
+        cv.imwrite(f"best_hough_line/best_line_img{i}.png", line_img)
+    
+    with ThreadPoolExecutor() as executor:
+        executor.map(worker , range(edge_arr.shape[0]))
 
 if __name__ == '__main__':
     teeths , w , h = read_frames()
@@ -299,7 +350,7 @@ if __name__ == '__main__':
     cv.imwrite("otsu_roi.png" , fin_mask[123])
     cv.imwrite("img_roi.png" , orig_mask[123])
     # waves = extract_triple_wave(fin_mask , cy)
-    # edge_img , hysteresis_high = orchecterate_canny_arr(orig_mask,5,1)
+    # edge_img , hysteresis_high = orchecterate_canny_arr(orig_mask[123],5,1)
     edge_arr = batch_canny(orig_mask , 3 ,1)
     # contours , _ = cv.findContours(fin_mask , cv.RETR_EXTERNAL , cv.CHAIN_APPROX_SIMPLE)
     # ellipse = cv.fitEllipse(max(contours , key=cv.contourArea))
@@ -349,8 +400,17 @@ if __name__ == '__main__':
     means = np.mean(center_line , axis=0)
     stds = np.std(center_line, axis=0)
     print(f"Gaussian Char mean: {means} , std {stds}")
-    
-    
+    batch_crop_roi(edge_arr , orig_mask , threshold , minA , maxA)
+    # line_ls = cv.HoughLines(edge_arr[123] , rho=1 ,theta = np.pi/180, threshold=threshold , min_theta=minA , max_theta = maxA)
+    # print(f"line_ls: {type(line_ls)}")
+    # draw_lines(line_ls , edge_arr[123])
+    # line = best_line(line_ls , means , stds)
+    # print(f"best line: {line}")
+    # cv.imwrite("best_line_img.png" , draw_line(line[0] , line[1] , cv.cvtColor(orig_mask[123] , cv.COLOR_GRAY2BGR)))
+    # crop_roi = rot_trlate_img(orig_mask[123], line , 500)
+    # print(crop_roi)
+    # cv.imwrite("crop_roi.png" , crop_roi)
+    # cv.imwrite("crop_roi_canny.png" , edge_arr[123])
  # Macro Pipeline -> parallel
  # Phase correlation for sub-pixel horizontal shift
  # fuzzy matching the 1D waves
