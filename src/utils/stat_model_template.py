@@ -4,6 +4,8 @@ from collections import deque
 from tqdm import tqdm
 from edge_det_utils import orchecterate_canny_arr
 from concurrent.futures import ThreadPoolExecutor
+from cotours import find_contours
+
 # 207 - 628
 # width: 2160 , height: 3840
 # (772, 3840, 2160)
@@ -127,10 +129,10 @@ def otsu_knn(binary_otsu: np.array , fg_knn: np.array):
     # ref_mask = (binary_otsu & dil_kern).astype(np.uint8)
     dil_stack = batch_ref_mask(fg_knn)
     ref_mask = (binary_otsu & dil_stack)
-    kernel = np.ones((5,2) , np.uint8)
+    kernel = cv.getStructuringElement(cv.MORPH_RECT ,(50,50))
     # solid_mask = cv.morphologyEx(ref_mask , cv.MORPH_OPEN, kernel)
     # solid_mask = (solid_mask > 0).astype(np.uint8) * 255
-    solid_mask = np.array([cv.morphologyEx(f , cv.MORPH_OPEN , kernel) for f in ref_mask])
+    solid_mask = np.array([cv.morphologyEx(f , cv.MORPH_CLOSE , kernel) for f in ref_mask])
     solid_mask[solid_mask > 0] = 255
     return solid_mask
 
@@ -159,27 +161,28 @@ def extract_wave(img: np.ndarray , y_com , height=10):
     strip = img[y_start:y_end , :]
     return np.mean(strip, axis=0)
 
-# def calculate_radial_profile(ellipse: cv.typing.RotatedRect, n=1000):
-#     (xc,yc) , (MA , ma) , angle = ellipse
-#     a = MA/2.0
-#     b = ma/2.0
+def calculate_radial_profile(ellipse: cv.typing.RotatedRect, n=1000):
+    (xc,yc) , (MA , ma) , angle = ellipse
+    a = MA/2.0
+    b = ma/2.0
     
-#     phi = np.radians(angle)
+    phi = np.radians(angle)
     
-#     theta = np.linspace(0 , 2*np.pi, n,endpoint=False)
-#     cos_theta = np.cos(theta)
-#     sin_theta = np.sin(theta)
+    theta = np.linspace(0 , 2*np.pi, n,endpoint=False)
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
     
-#     underside = np.sqrt((b*cos_theta)**2 + (a*sin_theta)**2)
-#     r_theta = (a*b) / underside
+    underside = np.sqrt((b*cos_theta)**2 + (a*sin_theta)**2)
+    r_theta = (a*b) / underside
     
-#     x_loc = r_theta*cos_theta
-#     y_loc = r_theta*sin_theta
+    x_loc = r_theta*cos_theta
+    y_loc = r_theta*sin_theta
     
-#     x = xc + (x_loc * np.cos(phi) - y_loc*np.sin(phi))
-#     y = yc + (x_loc * np.sin(phi) + y_loc*np.cos(phi))
+    x = xc + (x_loc * np.cos(phi) - y_loc*np.sin(phi))
+    y = yc + (x_loc * np.sin(phi) + y_loc*np.cos(phi))
     
-#     return x,y
+    return x,y
+
 def horizontal_shift(wave_cur , wave_arr):
     
     N= len(wave_cur)
@@ -304,7 +307,7 @@ def draw_line(rho , theta , line_img):
     cv.line(line_img , (x1, y1), (x2, y2), (0, 0, 255), 5)
     return line_img
 
-def draw_lines(lines, edge_img):
+def draw_lines(lines, edge_img , ret_img: bool = False):
     line_img = cv.cvtColor(edge_img, cv.COLOR_GRAY2BGR)
     min_dist = float('inf')
     for j in tqdm(range(0, len(lines)), desc="Checking line Fidelity"):
@@ -314,6 +317,8 @@ def draw_lines(lines, edge_img):
         if dist < min_dist:
             min_dist = dist
             line_img = draw_line(rho , theta , line_img)
+    if(ret_img == True):
+        return line_img
     cv.imwrite(f"edege_img__run_1.png" , line_img)
 
 def crop_roi(edge_img , orig_img , threshold , minA , maxA):
@@ -332,14 +337,29 @@ def batch_crop_roi(edge_arr , orig_mask, threshold , minA , maxA):
     with ThreadPoolExecutor() as executor:
         executor.map(worker , range(edge_arr.shape[0]))
 
+def rot_rect(otsu_roi):
+    contours = find_contours(otsu_roi)
+    conturs, _ = cv.findContours(otsu_roi , cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    main_gear = max(conturs , key=cv.contourArea)
+    # points = cv.findNonZero(otsu_roi)
+    rect = cv.minAreaRect(main_gear)
+    box = cv.boxPoints(rect)
+    print("box type", type(box))
+    box = np.astype(box , np.uint16)
+    return box
+
 if __name__ == '__main__':
     teeths , w , h = read_frames()
-    fame_coll = gt_frames(np.array(teeths) , 207 , 628)
+    fame_coll = gt_frames(np.array(teeths) , 207 , 628) 
     fg_mask = bg_sub(fame_coll)
     hist = master_hist(fame_coll)
     var , thresh = otsu_thresh(hist)
     binary = otsu_bin(fame_coll , thresh)
     solid_mask = otsu_knn(binary , fg_mask)
+    rect_mask = rot_rect(solid_mask[123])
+    y_min , y_max , x_min , x_max = np.min(rect_mask[: , 1]), np.max(rect_mask[: , 1]) , np.min(rect_mask[:, 0]) , np.max(rect_mask[: , 0])
+    cv.imwrite("rect_interpolation.png", solid_mask[123][y_min:y_max, x_min:x_max ])
+    print(f"rect roi box pts: {rect_mask}")
     fin_mask , orig_mask = roi_def(solid_mask , fame_coll)
     # print(f"final mask Shape , width: {fin_mask.shape[1]} , height: {fin_mask.shape[0]}")
     cx , cy , area = s_moments(fin_mask)
@@ -349,8 +369,17 @@ if __name__ == '__main__':
     cv.imwrite("solid_mask.png" , solid_mask[123])
     cv.imwrite("otsu_roi.png" , fin_mask[123])
     cv.imwrite("img_roi.png" , orig_mask[123])
-    # waves = extract_triple_wave(fin_mask , cy)
-    # edge_img , hysteresis_high = orchecterate_canny_arr(orig_mask[123],5,1)
+    waves = extract_triple_wave(fin_mask , cy)
+    edge_img , hysteresis_high , grad_img = orchecterate_canny_arr(orig_mask[123],5,1)
+    edge_img_02 = cv.Canny(orig_mask[123] , 1 , 3 , apertureSize=5 , L2gradient=True)
+    minA = np.deg2rad(5)
+    maxA = np.deg2rad(20)
+    threshold = 400
+    line_temp = cv.HoughLines(edge_img, rho=1 ,theta = np.pi/180, threshold=threshold , min_theta=minA , max_theta = maxA)
+    line_temp01 = cv.HoughLines(edge_img_02, rho=1 ,theta = np.pi/180, threshold=threshold , min_theta=minA , max_theta = maxA)
+    draw_lines(line_temp , edge_img)
+    cv.imwrite("canny_cv.png", draw_lines(line_temp01 , edge_img_02 ,ret_img=True))
+    quit()
     edge_arr = batch_canny(orig_mask , 3 ,1)
     # contours , _ = cv.findContours(fin_mask , cv.RETR_EXTERNAL , cv.CHAIN_APPROX_SIMPLE)
     # ellipse = cv.fitEllipse(max(contours , key=cv.contourArea))
@@ -360,10 +389,8 @@ if __name__ == '__main__':
     # cv.drawContours(col_img , contours , -1 , (0 , 255 , 0) , 2)
     # cv.ellipse(col_img,ellipse,(255 , 0 , 0), 2)
     # cv.imwrite('contaour_mask.png', col_img)
-    minA = np.deg2rad(5)
-    maxA = np.deg2rad(20)
-    threshold = 400
     lines = batch_hough(edge_arr, theta=np.pi/180 , threshold=threshold , min_theta=minA , max_theta=maxA)
+    
     # line_img = cv.cvtColor(edge_img, cv.COLOR_GRAY2BGR)
     # center_line = np.zeros((len(lines) , 2))
     # for i in tqdm(range(0 , len(lines)) , desc="Processing img Lines"):
@@ -401,16 +428,16 @@ if __name__ == '__main__':
     stds = np.std(center_line, axis=0)
     print(f"Gaussian Char mean: {means} , std {stds}")
     batch_crop_roi(edge_arr , orig_mask , threshold , minA , maxA)
-    # line_ls = cv.HoughLines(edge_arr[123] , rho=1 ,theta = np.pi/180, threshold=threshold , min_theta=minA , max_theta = maxA)
-    # print(f"line_ls: {type(line_ls)}")
-    # draw_lines(line_ls , edge_arr[123])
-    # line = best_line(line_ls , means , stds)
-    # print(f"best line: {line}")
-    # cv.imwrite("best_line_img.png" , draw_line(line[0] , line[1] , cv.cvtColor(orig_mask[123] , cv.COLOR_GRAY2BGR)))
-    # crop_roi = rot_trlate_img(orig_mask[123], line , 500)
+    line_ls = cv.HoughLines(edge_arr[123] , rho=1 ,theta = np.pi/180, threshold=threshold , min_theta=minA , max_theta = maxA)
+    print(f"line_ls: {type(line_ls)}")
+    draw_lines(line_ls , edge_arr[123])
+    line = best_line(line_ls , means , stds)
+    print(f"best line: {line}")
+    cv.imwrite("best_line_img.png" , draw_line(line[0] , line[1] , cv.cvtColor(orig_mask[123] , cv.COLOR_GRAY2BGR)))
+    crop_roi = rot_trlate_img(orig_mask[123], line , 500)
     # print(crop_roi)
-    # cv.imwrite("crop_roi.png" , crop_roi)
-    # cv.imwrite("crop_roi_canny.png" , edge_arr[123])
+    cv.imwrite("crop_roi.png" , crop_roi)
+    cv.imwrite("crop_roi_canny.png" , edge_arr[123])
  # Macro Pipeline -> parallel
  # Phase correlation for sub-pixel horizontal shift
  # fuzzy matching the 1D waves
